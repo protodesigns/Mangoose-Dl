@@ -11,6 +11,7 @@ logging.basicConfig(filename=LOG_PATH, level=logging.DEBUG,
 def _excepthook(exc_type, exc_value, exc_tb):
     msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     logging.critical(msg)
+    print(f"CRASH: {msg}")  # Also print to console for visibility
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -85,15 +86,15 @@ class Config:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE) as f:
                     self.data.update(json.load(f))
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Config load error: {e}")
 
     def save(self):
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(self.data, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Config save error: {e}")
 
     def get(self, key):
         return self.data.get(key, self.defaults.get(key))
@@ -175,7 +176,7 @@ class SplashScreen(tk.Toplevel):
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ERROR DIALOG
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════���═══════════════════════════════════════════════════
 class ErrorDialog(ctk.CTkToplevel):
     def __init__(self, parent, title="Error", message="An error occurred."):
         super().__init__(parent)
@@ -291,22 +292,31 @@ class QueueItem(ctk.CTkFrame):
         self.status_lbl.configure(text="Cancelled", text_color=WARNING_ORG)
 
     def update_progress(self, pct, speed, status_text, color=BLUE_ACCENT):
-        self.prog.configure(progress_color=color)
-        self.prog.set(pct / 100)
-        self.speed_lbl.configure(text=speed)
-        self.status_lbl.configure(text=status_text)
+        try:
+            self.prog.configure(progress_color=color)
+            self.prog.set(pct / 100)
+            self.speed_lbl.configure(text=speed)
+            self.status_lbl.configure(text=status_text)
+        except Exception as e:
+            logging.error(f"Progress update error: {e}")
 
     def mark_done(self):
-        self.prog.configure(progress_color=SUCCESS)
-        self.prog.set(1.0)
-        self.status_lbl.configure(text="✅ Done", text_color=SUCCESS)
-        self.speed_lbl.configure(text="")
-        self.cancel_btn.configure(state="disabled", text="Done")
+        try:
+            self.prog.configure(progress_color=SUCCESS)
+            self.prog.set(1.0)
+            self.status_lbl.configure(text="✅ Done", text_color=SUCCESS)
+            self.speed_lbl.configure(text="")
+            self.cancel_btn.configure(state="disabled", text="Done")
+        except Exception as e:
+            logging.error(f"Mark done error: {e}")
 
     def mark_error(self):
-        self.prog.configure(progress_color=ERROR_RED)
-        self.status_lbl.configure(text="❌ Error", text_color=ERROR_RED)
-        self.cancel_btn.configure(state="disabled")
+        try:
+            self.prog.configure(progress_color=ERROR_RED)
+            self.status_lbl.configure(text="❌ Error", text_color=ERROR_RED)
+            self.cancel_btn.configure(state="disabled")
+        except Exception as e:
+            logging.error(f"Mark error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -386,6 +396,7 @@ class DLMongoose(ctk.CTk):
         self.internet_ok     = True
         self.no_net_overlay  = None
         self.tray_icon       = None
+        self.should_exit     = False  # FIXED: Add exit flag for daemon threads
 
         self._load_history()
         self._build_ui()
@@ -614,7 +625,10 @@ class DLMongoose(ctk.CTk):
 
     def _hide_no_internet(self):
         if self.no_net_overlay:
-            self.no_net_overlay.destroy()
+            try:
+                self.no_net_overlay.destroy()
+            except Exception:
+                pass
             self.no_net_overlay = None
 
     def _retry_internet(self):
@@ -623,14 +637,17 @@ class DLMongoose(ctk.CTk):
             self._hide_no_internet()
 
     def _internet_watcher(self):
-        while True:
-            status = check_internet()
-            if status != self.internet_ok:
-                self.internet_ok = status
-                if status:
-                    self.after(0, self._hide_no_internet)
-                else:
-                    self.after(0, self._show_no_internet)
+        while not self.should_exit:  # FIXED: Exit flag for daemon thread
+            try:
+                status = check_internet()
+                if status != self.internet_ok:
+                    self.internet_ok = status
+                    if status:
+                        self.after(0, self._hide_no_internet)
+                    else:
+                        self.after(0, self._show_no_internet)
+            except Exception as e:
+                logging.error(f"Internet watcher error: {e}")
             time.sleep(5)
 
     # ── Download ──────────────────────────────────────────────────────────────
@@ -664,14 +681,19 @@ class DLMongoose(ctk.CTk):
         self.tabs.set("📋  Queue")
 
     def _download_worker(self):
-        while True:
-            item_id = self.dl_queue.get()
-            if item_id in self.queue_items and not self.cancel_flags.get(item_id):
-                try:
-                    self._do_download(item_id)
-                except Exception as e:
-                    logging.error(traceback.format_exc())
-            self.dl_queue.task_done()
+        while not self.should_exit:  # FIXED: Exit flag for daemon thread
+            try:
+                item_id = self.dl_queue.get(timeout=1)
+                if item_id in self.queue_items and not self.cancel_flags.get(item_id):
+                    try:
+                        self._do_download(item_id)
+                    except Exception as e:
+                        logging.error(traceback.format_exc())
+                self.dl_queue.task_done()
+            except Queue.Empty:
+                continue
+            except Exception as e:
+                logging.error(f"Download worker error: {e}")
 
     def _do_download(self, item_id):
         info = self.queue_items.get(item_id)
@@ -787,15 +809,16 @@ class DLMongoose(ctk.CTk):
             if os.path.exists(HISTORY_FILE):
                 with open(HISTORY_FILE) as f:
                     self.history = json.load(f)
-        except Exception:
+        except Exception as e:
+            logging.error(f"History load error: {e}")
             self.history = []
 
     def _save_history(self):
         try:
             with open(HISTORY_FILE, "w") as f:
                 json.dump(self.history[-200:], f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"History save error: {e}")
 
     def _add_history(self, title, path):
         self.history.insert(0, {
@@ -988,13 +1011,26 @@ class DLMongoose(ctk.CTk):
                 pystray.MenuItem("Quit", self._quit_app),
             )
             self.tray_icon = pystray.Icon("dlmongoose", img, APP_NAME, menu)
-        except Exception:
+            print("✓ Tray icon initialized successfully")
+        except ImportError as e:
+            print(f"⚠ Tray unavailable: {e}")
+            logging.warning(f"Tray import error: {e}")
+            self.tray_icon = None
+        except Exception as e:
+            print(f"✗ Tray setup error: {e}")
+            logging.error(f"Tray setup error: {e}")
             self.tray_icon = None
 
     def _minimize_to_tray(self):
         if self.tray_icon:
-            self.withdraw()
-            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            try:
+                self.withdraw()
+                threading.Thread(target=self.tray_icon.run, daemon=True).start()
+            except Exception as e:
+                print(f"Tray minimize error: {e}")
+                logging.error(f"Tray minimize error: {e}")
+                self.deiconify()
+                self.iconify()
         else:
             self.iconify()
 
@@ -1013,6 +1049,7 @@ class DLMongoose(ctk.CTk):
         self._quit_app()
 
     def _quit_app(self, icon=None, item=None):
+        self.should_exit = True  # FIXED: Signal daemon threads to exit
         try:
             if self.tray_icon:
                 self.tray_icon.stop()
@@ -1042,6 +1079,7 @@ if __name__ == "__main__":
     except Exception as e:
         msg = traceback.format_exc()
         logging.critical(msg)
+        print(f"FATAL: {msg}")  # Print to console too
         try:
             import tkinter as tk
             from tkinter import messagebox
